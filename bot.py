@@ -543,6 +543,95 @@ async def process_reminder_time(message: Message, state: FSMContext):
     except ValueError as e:
         await message.answer(f"Ошибка: {e}. Попробуйте еще раз в формате ЧЧ:ММ.")
 
+# Анкета обратной связи
+class FeedbackForm(StatesGroup):
+    feedback = State()
+
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Добавить запись в дневник")],
+        [KeyboardButton(text="Получить рекомендацию")],
+        [KeyboardButton(text="Настройки")],
+        [KeyboardButton(text="Оставить отзыв")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
+@dp.message(lambda m: m.text == "Оставить отзыв")
+async def handle_menu_feedback(message: Message, state: FSMContext):
+    await state.set_state(FeedbackForm.feedback)
+    await message.answer("Пожалуйста, оставьте ваш отзыв:", reply_markup=ReplyKeyboardRemove())
+
+@dp.message(FeedbackForm.feedback)
+async def process_feedback(message: Message, state: FSMContext):
+    feedback = message.text
+    user_id = message.from_user.id
+
+    # Сохранение отзыва в базу данных
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO feedback (user_id, feedback)
+            VALUES (?, ?)
+            """,
+            (user_id, feedback)
+        )
+        await db.commit()
+
+    await state.clear()
+    await message.answer("Спасибо за ваш отзыв!", reply_markup=main_menu)
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                age INTEGER,
+                email TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS diary (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                situation TEXT,
+                thought TEXT,
+                emotion TEXT,
+                reaction TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminders (
+                user_id INTEGER PRIMARY KEY,
+                enabled INTEGER DEFAULT 0,
+                time TEXT,
+                last_sent_date DATE,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                feedback TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
+        )
+        await db.commit()
+
 # --- Main Entry Point ---
 async def main():
     # Initialize DB
