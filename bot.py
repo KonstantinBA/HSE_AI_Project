@@ -3,6 +3,7 @@ import json
 import logging
 import uuid
 import os
+from docx import Document
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_gigachat import GigaChat
@@ -31,7 +32,8 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    FSInputFile
 )
 
 # Загружаем переменные из файла .env
@@ -80,6 +82,7 @@ main_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="Добавить запись в дневник")],
         [KeyboardButton(text="Получить рекомендацию")],
         [KeyboardButton(text="Оставить отзыв")],
+        [KeyboardButton(text="Экспортировать дневник")],
         [KeyboardButton(text="Настройки")]
     ],
     resize_keyboard=True,
@@ -224,7 +227,7 @@ async def get_last_diary_entry(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """
-            SELECT situation, thought, emotion, reaction
+            SELECT id, situation, thought, emotion, reaction
             FROM diary
             WHERE user_id = ?
             ORDER BY created_at DESC
@@ -232,7 +235,10 @@ async def get_last_diary_entry(user_id: int):
             """,
             (user_id,)
         ) as cursor:
-            return await cursor.fetchone()
+            entry = await cursor.fetchone()
+            if entry:
+                return entry[1], entry[2], entry[3], entry[4], entry[0]
+            return None
 
 def generate_prompt(situation: str, thought: str, emotion: str, reaction: str) -> str:
     """Генерация промпта для GigaChat"""
@@ -446,13 +452,25 @@ async def cmd_get_recommendation(message: Message):
         return
 
     # Генерация промпта
-    situation, thought, emotion, reaction = last_entry
+    situation, thought, emotion, reaction, entry_id = last_entry
     prompt = generate_prompt(situation, thought, emotion, reaction)
 
     # Получение рекомендации от GigaChat
     try:
         recommendation = await get_recommendation(prompt)
         
+        # Обновляем запись в дневнике с рекомендацией
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                UPDATE diary
+                SET recommendation = ?
+                WHERE id = ?
+                """,
+                (recommendation, entry_id)
+            )
+            await db.commit()
+
         # Разбиваем текст на части, если он слишком длинный
         messages = split_message(recommendation)
         for msg in messages:
@@ -461,6 +479,54 @@ async def cmd_get_recommendation(message: Message):
     except Exception as e:
         await message.answer(f"Произошла ошибка при запросе к GigaChat: {e}")
 
+@dp.message(lambda m: m.text == "Экспортировать дневник")
+async def handle_export_diary(message: Message):
+    user_id = message.from_user.id
+    
+    # Получение всех записей пользователя из БД
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT situation, thought, emotion, reaction, recommendation, created_at
+            FROM diary
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (user_id,)
+        ) as cursor:
+            entries = await cursor.fetchall()
+
+    if not entries:
+        await message.answer("Ваш дневник пуст. Добавьте записи, чтобы экспортировать их.")
+        return
+
+    # Генерация DOCX-файла
+    document = Document()
+    document.add_heading("Дневник пользователя", level=1)
+
+    for idx, (situation, thought, emotion, reaction, recommendation, created_at) in enumerate(entries, start=1):
+        document.add_heading(f"Запись #{idx}", level=2)
+        document.add_paragraph(f"Дата: {created_at}")
+        document.add_paragraph(f"Ситуация: {situation}")
+        document.add_paragraph(f"Мысль: {thought}")
+        document.add_paragraph(f"Эмоция: {emotion}")
+        document.add_paragraph(f"Реакция: {reaction}")
+        document.add_paragraph(f"Рекомендация: {recommendation or 'Не получена'}")
+        document.add_paragraph("-" * 118)
+
+    # Сохранение файла на сервере
+    file_path = f"tmp/diary_{user_id}.docx"
+    document.save(file_path)
+
+    # Отправка файла пользователю
+    input_file = FSInputFile(file_path)
+    await message.answer_document(
+        document=input_file,
+        caption="Ваш дневник в формате DOCX"
+    )
+
+    # Удаление временного файла
+    os.remove(file_path)
 
 # --- Update the settings menu handler ---
 @dp.message(lambda m: m.text == "Настройки")
@@ -583,6 +649,7 @@ async def init_db():
                 thought TEXT,
                 emotion TEXT,
                 reaction TEXT,
+                recommendation TEXT DEFAULT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
@@ -611,6 +678,7 @@ async def init_db():
             """
         )
         await db.commit()
+
 
 # --- Main Entry Point ---
 async def main():

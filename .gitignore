@@ -3,3 +3,4 @@ db.sqlite3
 venv
 database/users.db
 users.db
+tmp
