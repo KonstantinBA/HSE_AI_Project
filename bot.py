@@ -3,6 +3,9 @@ import json
 import logging
 import uuid
 import os
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain_gigachat import GigaChat
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict
@@ -76,8 +79,8 @@ main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Добавить запись в дневник")],
         [KeyboardButton(text="Получить рекомендацию")],
-        [KeyboardButton(text="Настройки")],
-        [KeyboardButton(text="Оставить отзыв")]
+        [KeyboardButton(text="Оставить отзыв")],
+        [KeyboardButton(text="Настройки")]
     ],
     resize_keyboard=True,
     one_time_keyboard=True
@@ -231,15 +234,8 @@ async def get_last_diary_entry(user_id: int):
         ) as cursor:
             return await cursor.fetchone()
 
-async def generate_prompt_from_last_entry(user_id: int) -> str:
-    last_entry = await get_last_diary_entry(user_id)
-    if last_entry is None:
-        return (
-            "У вас еще нет записей в дневнике. "
-            "Добавьте запись, чтобы получить рекомендацию."
-        )
-
-    situation, thought, emotion, reaction = last_entry
+def generate_prompt(situation: str, thought: str, emotion: str, reaction: str) -> str:
+    """Генерация промпта для GigaChat"""
     return f"""
         Ты — квалифицированный психолог с глубоким пониманием когнитивно-поведенческой терапии и эмоционального интеллекта.
         Твоя задача — анализировать записи из дневника СМЭР пользователя и предоставлять обоснованные рекомендации
@@ -252,6 +248,7 @@ async def generate_prompt_from_last_entry(user_id: int) -> str:
         Мысль: {thought}
         Эмоция: {emotion}
         Реакция: {reaction}
+
         На основе этой информации:
 
         1. Проанализируй связь между ситуацией, мыслью, эмоцией и реакцией, выявив возможные когнитивные искажения или паттерны поведения.
@@ -260,59 +257,33 @@ async def generate_prompt_from_last_entry(user_id: int) -> str:
         4. Объясни, почему именно эти подходы эффективны в данной ситуации, ссылаясь на психологические теории или исследования.
         5. Добавь практический совет или упражнение, которое пользователь сможет легко внедрить в свою повседневную жизнь
         для улучшения эмоционального состояния и реакции.
+        
         Важно: Не используй шаблонные или общие рекомендации.
-               Все советы должны быть адаптированы к конкретной записи пользователя и основываться на надежных психологических принципах.
-               Не пиши более 4000 символов.
+        Все советы должны быть адаптированы к конкретной записи пользователя и основываться на надежных психологических принципах.
+        Пиши коротко.
+        Не пиши более 3000 символов.
     """
 
-async def get_gigachat_token() -> str:
-    rq_uid = str(uuid.uuid4())
-    url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    payload = {"scope": "GIGACHAT_API_PERS"}
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-        "RqUID": rq_uid,
-        "Authorization": f"Basic {API_KEY}"
-    }
+# Инициализация модели GigaChat
+GIGACHAT_CREDENTIALS = API_KEY  # Используем ключ авторизации из переменных окружения
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, data=payload, ssl=False) as resp:
-            response_data = await resp.json()
-            logger.info(f"Response from token API: {response_data}")
-            return response_data["access_token"]
+async def get_recommendation(prompt: str) -> str:
+    """Получение рекомендации от GigaChat"""
+    try:
+        # Создание шаблона для промпта
+        prompt_template = PromptTemplate(template=prompt)
 
-async def get_recommendation(prompt: str, giga_token: str) -> str:
-    url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
-    payload = json.dumps({
-        "model": "GigaChat",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5,
-        "top_p": 0.5,
-        "n": 1,
-        "stream": False,
-        "max_tokens": 1024,
-        "repetition_penalty": 1,
-        "update_interval": 0
-    })
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {giga_token}"
-    }
+        # Создание цепочки с GigaChat
+        chain = LLMChain(
+            llm=GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, max_tokens=900, model="GigaChat-Max"),
+            prompt=prompt_template
+        )
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, headers=headers, data=payload, ssl=False) as resp:
-                if resp.status != 200:
-                    raise Exception(
-                        "Произошла ошибка при получении рекомендации. "
-                        "Пожалуйста, попробуйте позже."
-                    )
-                result = await resp.json()
-                return result["choices"][0]["message"]["content"]
-        except aiohttp.ClientError as e:
-            raise Exception(f"Ошибка при выполнении запроса: {e}")
+        # Выполнение цепочки и получение результата
+        result = await chain.arun({})
+        return result
+    except Exception as e:
+        raise Exception(f"Ошибка при запросе к GigaChat: {e}")
 
 # --- Register Middleware ---
 dp.update.middleware.register(RegistrationMiddleware())
@@ -460,26 +431,36 @@ async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def split_message(message: str, chunk_size: int = 4000) -> list:
+    """Разбивает сообщение на части, чтобы каждая часть была не длиннее chunk_size."""
+    return [message[i:i + chunk_size] for i in range(0, len(message), chunk_size)]
+
 @dp.message(Command(commands=["get_recommendation"]))
 async def cmd_get_recommendation(message: Message):
     user_id = message.from_user.id
-    prompt = await generate_prompt_from_last_entry(user_id)
-
-    if prompt.startswith("У вас еще нет записей"):
-        await message.answer(prompt)
+    
+    # Получение последней записи из дневника
+    last_entry = await get_last_diary_entry(user_id)
+    if not last_entry:
+        await message.answer("У вас еще нет записей в дневнике. Добавьте запись, чтобы получить рекомендацию.")
         return
 
-    try:
-        giga_token = await get_gigachat_token()
-    except Exception as e:
-        await message.answer(f"Ошибка при получении токена: {e}")
-        return
+    # Генерация промпта
+    situation, thought, emotion, reaction = last_entry
+    prompt = generate_prompt(situation, thought, emotion, reaction)
 
+    # Получение рекомендации от GigaChat
     try:
-        recommendation = await get_recommendation(prompt, giga_token)
-        await message.answer(f"Рекомендация:\n{recommendation}")
+        recommendation = await get_recommendation(prompt)
+        
+        # Разбиваем текст на части, если он слишком длинный
+        messages = split_message(recommendation)
+        for msg in messages:
+            await message.answer(msg)  # Отправляем каждую часть по отдельности
+
     except Exception as e:
-        await message.answer(str(e))
+        await message.answer(f"Произошла ошибка при запросе к GigaChat: {e}")
+
 
 # --- Update the settings menu handler ---
 @dp.message(lambda m: m.text == "Настройки")
