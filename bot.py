@@ -7,6 +7,7 @@ from docx import Document
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain_gigachat import GigaChat
+from langchain.memory import ConversationBufferMemory
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict
@@ -16,6 +17,7 @@ import nest_asyncio
 import aiosqlite
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
+
 
 from aiogram import Bot, Dispatcher, BaseMiddleware, types
 from aiogram.client.default import DefaultBotProperties
@@ -45,6 +47,9 @@ API_KEY = os.getenv('GIGACHAT_KEY')
 
 DB_PATH = "database/users.db"
 moscow_tz = timezone("Europe/Moscow")
+
+# Словарь для хранения памяти диалогов для каждого пользователя
+user_memories = {}
 
 # --- Logging configuration ---
 logging.basicConfig(level=logging.INFO)
@@ -81,6 +86,7 @@ main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Добавить запись в дневник")],
         [KeyboardButton(text="Получить рекомендацию")],
+        [KeyboardButton(text="Продолжить диалог с GigaChat")],
         [KeyboardButton(text="Оставить отзыв")],
         [KeyboardButton(text="Экспортировать дневник")],
         [KeyboardButton(text="Настройки")]
@@ -109,6 +115,33 @@ settings_menu = InlineKeyboardMarkup(
         ]
     ]
 )
+
+async def generate_main_menu(user_id: int) -> ReplyKeyboardMarkup:
+    """Генерация главного меню с учетом наличия рекомендации."""
+    has_reco = await has_recommendation(user_id)
+    buttons = [
+        [KeyboardButton(text="Добавить запись в дневник")],
+        [KeyboardButton(text="Получить рекомендацию")],
+    ]
+    
+    if has_reco:  # Добавляем кнопку только если есть рекомендация
+        buttons.append([KeyboardButton(text="Продолжить диалог с GigaChat")])
+
+    buttons.extend([
+        [KeyboardButton(text="Оставить отзыв")],
+        [KeyboardButton(text="Экспортировать дневник")],
+        [KeyboardButton(text="Настройки")],
+    ])
+
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+
+
+def get_end_dialog_button():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Завершить диалог", callback_data="end_dialog")]
+        ]
+    )
 
 # --- Middleware for registration check ---
 class RegistrationMiddleware(BaseMiddleware):
@@ -273,23 +306,59 @@ def generate_prompt(situation: str, thought: str, emotion: str, reaction: str) -
 # Инициализация модели GigaChat
 GIGACHAT_CREDENTIALS = API_KEY  # Используем ключ авторизации из переменных окружения
 
-async def get_recommendation(prompt: str) -> str:
-    """Получение рекомендации от GigaChat"""
+async def get_recommendation_with_memory(user_id: int, prompt: str) -> str:
+    """Получение ответа от GigaChat с учетом истории диалога."""
     try:
-        # Создание шаблона для промпта
-        prompt_template = PromptTemplate(template=prompt)
+        # Создаем или используем память пользователя
+        if user_id not in user_memories:
+            user_memories[user_id] = ConversationBufferMemory()
 
-        # Создание цепочки с GigaChat
-        chain = LLMChain(
-            llm=GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, max_tokens=900, model="GigaChat-Max"),
-            prompt=prompt_template
+        memory = user_memories[user_id]
+
+        # Создаем шаблон для промпта
+        prompt_template = PromptTemplate(
+            input_variables=["input"],  # Это переменные, используемые в вашем промпте
+            template="{input}"          # Простой шаблон, который берет весь ввод как есть
         )
 
-        # Выполнение цепочки и получение результата
-        result = await chain.arun({})
-        return result
+        # Создаем цепочку с памятью
+        chain = LLMChain(
+            llm=GigaChat(
+                credentials=GIGACHAT_CREDENTIALS,
+                verify_ssl_certs=False,
+                max_tokens=900,
+                model="GigaChat-Max"
+            ),
+            memory=memory,
+            prompt=prompt_template,  # Передаем промпт
+            verbose=True
+        )
+
+        # Выполняем запрос с переданным текстом
+        response = await chain.arun({"input": prompt})
+        return response
+
     except Exception as e:
         raise Exception(f"Ошибка при запросе к GigaChat: {e}")
+
+async def has_recommendation(user_id: int) -> bool:
+    """Проверяет, есть ли рекомендация к последней записи пользователя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT recommendation
+            FROM diary
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:  # Проверяем, есть ли рекомендация
+                return True
+    return False
+
 
 # --- Register Middleware ---
 dp.update.middleware.register(RegistrationMiddleware())
@@ -304,11 +373,11 @@ async def cmd_start(message: Message, state: FSMContext):
         ) as cursor:
             user = await cursor.fetchone()
 
-            # If no user in DB, begin registration
-            if user is None:
+            if user is None:  # Если пользователь не зарегистрирован
                 await state.set_state(RegistrationForm.name)
                 await message.answer("Введите ваше имя:")
             else:
+                main_menu = await generate_main_menu(user_id)  # Динамическое меню
                 await message.answer(
                     f"Привет, {user[1]}! Вы уже зарегистрированы!",
                     reply_markup=main_menu
@@ -400,6 +469,7 @@ async def process_reaction(message: Message, state: FSMContext):
         await db.commit()
 
     await state.clear()
+    main_menu = await generate_main_menu(message.from_user.id)  # Динамическое меню
     await message.answer("Запись успешно сохранена!", reply_markup=main_menu)
 
 @dp.message(lambda m: m.text == "Получить рекомендацию")
@@ -457,9 +527,9 @@ async def cmd_get_recommendation(message: Message):
 
     # Получение рекомендации от GigaChat
     try:
-        recommendation = await get_recommendation(prompt)
-        
-        # Обновляем запись в дневнике с рекомендацией
+        recommendation = await get_recommendation_with_memory(user_id, prompt)  # Передаем user_id и prompt
+
+        # Сохраняем рекомендацию в дневник
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
@@ -527,6 +597,79 @@ async def handle_export_diary(message: Message):
 
     # Удаление временного файла
     os.remove(file_path)
+
+@dp.message(lambda m: m.text == "Продолжить диалог с GigaChat")
+async def handle_continue_dialog_with_gigachat(message: Message):
+    user_id = message.from_user.id
+    
+    # Получение последней записи из дневника
+    last_entry = await get_last_diary_entry(user_id)
+    if not last_entry:
+        await message.answer("У вас еще нет записей в дневнике. Добавьте запись, чтобы начать диалог с GigaChat.")
+        return
+
+    # Генерация промпта на основе последней записи
+    situation, thought, emotion, reaction, entry_id = last_entry
+    prompt = generate_prompt(situation, thought, emotion, reaction)
+
+    # Добавляем контекст для продолжения диалога
+    continuation_prompt = f"""
+    На основе анализа последней записи и рекомендаций:
+    {prompt}
+
+    Теперь ты можешь задать вопрос пользователю или предложить дополнительную поддержку.
+    Сформулируй вопрос или идею для обсуждения, чтобы продолжить диалог.
+    """
+
+    try:
+        # Получение ответа от GigaChat с памятью
+        response = await get_recommendation_with_memory(user_id, continuation_prompt)
+        await message.answer(
+            f"ГигаЧат: {response}",
+            reply_markup=get_end_dialog_button()
+        )
+    except Exception as e:
+        await message.answer(f"Произошла ошибка при взаимодействии с GigaChat: {e}")
+
+@dp.message(lambda m: m.reply_to_message and "ГигаЧат" in m.reply_to_message.text)
+async def handle_follow_up_with_gigachat(message: Message):
+    user_id = message.from_user.id
+    user_question = message.text
+
+    # Формируем промпт на основе вопроса пользователя
+    follow_up_prompt = f"""
+    Пользователь задал вопрос или продолжил диалог:
+    "{user_question}"
+
+    Ответь подробно и продолжи поддерживать диалог, опираясь на предыдущий контекст.
+    """
+
+    try:
+        # Получение ответа от GigaChat с памятью
+        response = await get_recommendation_with_memory(user_id, follow_up_prompt)
+        await message.answer(
+            f"ГигаЧат: {response}",
+            reply_markup=get_end_dialog_button()
+        )
+    except Exception as e:
+        await message.answer(f"Произошла ошибка при взаимодействии с GigaChat: {e}")
+
+@dp.callback_query(lambda c: c.data == "end_dialog")
+async def handle_end_dialog(callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+
+    # Очистка памяти пользователя
+    if user_id in user_memories:
+        user_memories[user_id].clear()
+
+    # Уведомляем пользователя о завершении диалога
+    await callback_query.answer("Диалог завершен.")
+
+    # Отправляем новое сообщение с главным меню
+    await callback_query.message.reply(
+        "Диалог с GigaChat завершен. Вы вернулись в главное меню.",
+        reply_markup=main_menu  # Отправляем главное меню
+    )
 
 # --- Update the settings menu handler ---
 @dp.message(lambda m: m.text == "Настройки")
