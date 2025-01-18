@@ -3,11 +3,6 @@ import json
 import logging
 import uuid
 import os
-from docx import Document
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain_gigachat import GigaChat
-from langchain.memory import ConversationBufferMemory
 from dotenv import load_dotenv
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict
@@ -17,7 +12,6 @@ import nest_asyncio
 import aiosqlite
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
-
 
 from aiogram import Bot, Dispatcher, BaseMiddleware, types
 from aiogram.client.default import DefaultBotProperties
@@ -34,8 +28,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    FSInputFile
+    ReplyKeyboardRemove
 )
 
 # Загружаем переменные из файла .env
@@ -47,9 +40,6 @@ API_KEY = os.getenv('GIGACHAT_KEY')
 
 DB_PATH = "database/users.db"
 moscow_tz = timezone("Europe/Moscow")
-
-# Словарь для хранения памяти диалогов для каждого пользователя
-user_memories = {}
 
 # --- Logging configuration ---
 logging.basicConfig(level=logging.INFO)
@@ -86,9 +76,6 @@ main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Добавить запись в дневник")],
         [KeyboardButton(text="Получить рекомендацию")],
-        [KeyboardButton(text="Продолжить диалог с GigaChat")],
-        [KeyboardButton(text="Оставить отзыв")],
-        [KeyboardButton(text="Экспортировать дневник")],
         [KeyboardButton(text="Настройки")]
     ],
     resize_keyboard=True,
@@ -115,33 +102,6 @@ settings_menu = InlineKeyboardMarkup(
         ]
     ]
 )
-
-async def generate_main_menu(user_id: int) -> ReplyKeyboardMarkup:
-    """Генерация главного меню с учетом наличия рекомендации."""
-    has_reco = await has_recommendation(user_id)
-    buttons = [
-        [KeyboardButton(text="Добавить запись в дневник")],
-        [KeyboardButton(text="Получить рекомендацию")],
-    ]
-    
-    if has_reco:  # Добавляем кнопку только если есть рекомендация
-        buttons.append([KeyboardButton(text="Продолжить диалог с GigaChat")])
-
-    buttons.extend([
-        [KeyboardButton(text="Оставить отзыв")],
-        [KeyboardButton(text="Экспортировать дневник")],
-        [KeyboardButton(text="Настройки")],
-    ])
-
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
-
-
-def get_end_dialog_button():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Завершить диалог", callback_data="end_dialog")]
-        ]
-    )
 
 # --- Middleware for registration check ---
 class RegistrationMiddleware(BaseMiddleware):
@@ -260,7 +220,7 @@ async def get_last_diary_entry(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """
-            SELECT id, situation, thought, emotion, reaction
+            SELECT situation, thought, emotion, reaction
             FROM diary
             WHERE user_id = ?
             ORDER BY created_at DESC
@@ -268,97 +228,81 @@ async def get_last_diary_entry(user_id: int):
             """,
             (user_id,)
         ) as cursor:
-            entry = await cursor.fetchone()
-            if entry:
-                return entry[1], entry[2], entry[3], entry[4], entry[0]
-            return None
+            return await cursor.fetchone()
 
-def generate_prompt(situation: str, thought: str, emotion: str, reaction: str) -> str:
-    """Генерация промпта для GigaChat"""
+async def generate_prompt_from_last_entry(user_id: int) -> str:
+    last_entry = await get_last_diary_entry(user_id)
+    if last_entry is None:
+        return (
+            "У вас еще нет записей в дневнике. "
+            "Добавьте запись, чтобы получить рекомендацию."
+        )
+
+    situation, thought, emotion, reaction = last_entry
     return f"""
-        Ты — квалифицированный психолог с глубоким пониманием когнитивно-поведенческой терапии и эмоционального интеллекта.
-        Твоя задача — анализировать записи из дневника СМЭР пользователя и предоставлять обоснованные рекомендации
-        по управлению эмоциями и реакциями, а также другие полезные психологические советы.
-        При этом ты используешь только достоверные данные и избегаешь любых предположений или вымышленных фактов.
+        Ты — опытный психолог, способный видеть ситуации с неожиданной стороны и предлагать креативные, но обоснованные рекомендации.  
+        Пользователь описал следующую ситуацию:  
+        - Ситуация: {situation}  
+        - Мысль: {thought}  
+        - Эмоция: {emotion}  
+        - Реакция: {reaction}  
 
-        Пользователь предоставил следующую запись:
-
-        Ситуация: {situation}
-        Мысль: {thought}
-        Эмоция: {emotion}
-        Реакция: {reaction}
-
-        На основе этой информации:
-
-        1. Проанализируй связь между ситуацией, мыслью, эмоцией и реакцией, выявив возможные когнитивные искажения или паттерны поведения.
-        2. Предложи конкретные стратегии или техники для управления данными эмоциями и реакциями, опираясь на доказанные психологические методы.
-        3. Используй примеры из жизни или метафоры, чтобы иллюстрировать предложенные рекомендации и сделать их более понятными и применимыми.
-        4. Объясни, почему именно эти подходы эффективны в данной ситуации, ссылаясь на психологические теории или исследования.
-        5. Добавь практический совет или упражнение, которое пользователь сможет легко внедрить в свою повседневную жизнь
-        для улучшения эмоционального состояния и реакции.
-        
-        Важно: Не используй шаблонные или общие рекомендации.
-        Все советы должны быть адаптированы к конкретной записи пользователя и основываться на надежных психологических принципах.
-        Пиши коротко.
-        Не пиши более 3000 символов.
+        На основе этих данных:  
+        1. Предложи оригинальный способ справиться с эмоциями или реакциями, не прибегая к шаблонным решениям.  
+        2. Используй творческие подходы, метафоры или примеры из жизни.  
+        3. Обоснуй, почему этот подход может помочь именно в данной ситуации.  
+        4. Добавь небольшой практический совет или технику, которая может быть легко применена.
+        5. Постарайся уложиться в 4000 символа.
     """
 
-# Инициализация модели GigaChat
-GIGACHAT_CREDENTIALS = API_KEY  # Используем ключ авторизации из переменных окружения
+async def get_gigachat_token() -> str:
+    rq_uid = str(uuid.uuid4())
+    url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+    payload = {"scope": "GIGACHAT_API_PERS"}
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "RqUID": rq_uid,
+        "Authorization": f"Basic {API_KEY}"
+    }
 
-async def get_recommendation_with_memory(user_id: int, prompt: str) -> str:
-    """Получение ответа от GigaChat с учетом истории диалога."""
-    try:
-        # Создаем или используем память пользователя
-        if user_id not in user_memories:
-            user_memories[user_id] = ConversationBufferMemory()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, data=payload, ssl=False) as resp:
+            response_data = await resp.json()
+            logger.info(f"Response from token API: {response_data}")
+            return response_data["access_token"]
 
-        memory = user_memories[user_id]
+async def get_recommendation(prompt: str, giga_token: str) -> str:
+    url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+    payload = json.dumps({
+        "model": "GigaChat",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 1,
+        "top_p": 0.5,
+        "n": 1,
+        "stream": False,
+        "max_tokens": 1024,
+        "repetition_penalty": 1,
+        "update_interval": 0
+    })
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {giga_token}"
+    }
 
-        # Создаем шаблон для промпта
-        prompt_template = PromptTemplate(
-            input_variables=["input"],  # Это переменные, используемые в вашем промпте
-            template="{input}"          # Простой шаблон, который берет весь ввод как есть
-        )
-
-        # Создаем цепочку с памятью
-        chain = LLMChain(
-            llm=GigaChat(
-                credentials=GIGACHAT_CREDENTIALS,
-                verify_ssl_certs=False,
-                max_tokens=900,
-                model="GigaChat-Max"
-            ),
-            memory=memory,
-            prompt=prompt_template,  # Передаем промпт
-            verbose=True
-        )
-
-        # Выполняем запрос с переданным текстом
-        response = await chain.arun({"input": prompt})
-        return response
-
-    except Exception as e:
-        raise Exception(f"Ошибка при запросе к GigaChat: {e}")
-
-async def has_recommendation(user_id: int) -> bool:
-    """Проверяет, есть ли рекомендация к последней записи пользователя."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            """
-            SELECT recommendation
-            FROM diary
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:  # Проверяем, есть ли рекомендация
-                return True
-    return False
-
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, headers=headers, data=payload, ssl=False) as resp:
+                if resp.status != 200:
+                    raise Exception(
+                        "Произошла ошибка при получении рекомендации. "
+                        "Пожалуйста, попробуйте позже."
+                    )
+                result = await resp.json()
+                return result["choices"][0]["message"]["content"]
+        except aiohttp.ClientError as e:
+            raise Exception(f"Ошибка при выполнении запроса: {e}")
 
 # --- Register Middleware ---
 dp.update.middleware.register(RegistrationMiddleware())
@@ -373,11 +317,11 @@ async def cmd_start(message: Message, state: FSMContext):
         ) as cursor:
             user = await cursor.fetchone()
 
-            if user is None:  # Если пользователь не зарегистрирован
+            # If no user in DB, begin registration
+            if user is None:
                 await state.set_state(RegistrationForm.name)
                 await message.answer("Введите ваше имя:")
             else:
-                main_menu = await generate_main_menu(user_id)  # Динамическое меню
                 await message.answer(
                     f"Привет, {user[1]}! Вы уже зарегистрированы!",
                     reply_markup=main_menu
@@ -469,7 +413,6 @@ async def process_reaction(message: Message, state: FSMContext):
         await db.commit()
 
     await state.clear()
-    main_menu = await generate_main_menu(message.from_user.id)  # Динамическое меню
     await message.answer("Запись успешно сохранена!", reply_markup=main_menu)
 
 @dp.message(lambda m: m.text == "Получить рекомендацию")
@@ -507,169 +450,26 @@ async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def split_message(message: str, chunk_size: int = 4000) -> list:
-    """Разбивает сообщение на части, чтобы каждая часть была не длиннее chunk_size."""
-    return [message[i:i + chunk_size] for i in range(0, len(message), chunk_size)]
-
 @dp.message(Command(commands=["get_recommendation"]))
 async def cmd_get_recommendation(message: Message):
     user_id = message.from_user.id
-    
-    # Получение последней записи из дневника
-    last_entry = await get_last_diary_entry(user_id)
-    if not last_entry:
-        await message.answer("У вас еще нет записей в дневнике. Добавьте запись, чтобы получить рекомендацию.")
+    prompt = await generate_prompt_from_last_entry(user_id)
+
+    if prompt.startswith("У вас еще нет записей"):
+        await message.answer(prompt)
         return
 
-    # Генерация промпта
-    situation, thought, emotion, reaction, entry_id = last_entry
-    prompt = generate_prompt(situation, thought, emotion, reaction)
-
-    # Получение рекомендации от GigaChat
     try:
-        recommendation = await get_recommendation_with_memory(user_id, prompt)  # Передаем user_id и prompt
-
-        # Сохраняем рекомендацию в дневник
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                """
-                UPDATE diary
-                SET recommendation = ?
-                WHERE id = ?
-                """,
-                (recommendation, entry_id)
-            )
-            await db.commit()
-
-        # Разбиваем текст на части, если он слишком длинный
-        messages = split_message(recommendation)
-        for msg in messages:
-            await message.answer(msg)  # Отправляем каждую часть по отдельности
-
+        giga_token = await get_gigachat_token()
     except Exception as e:
-        await message.answer(f"Произошла ошибка при запросе к GigaChat: {e}")
-
-@dp.message(lambda m: m.text == "Экспортировать дневник")
-async def handle_export_diary(message: Message):
-    user_id = message.from_user.id
-    
-    # Получение всех записей пользователя из БД
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            """
-            SELECT situation, thought, emotion, reaction, recommendation, created_at
-            FROM diary
-            WHERE user_id = ?
-            ORDER BY created_at ASC
-            """,
-            (user_id,)
-        ) as cursor:
-            entries = await cursor.fetchall()
-
-    if not entries:
-        await message.answer("Ваш дневник пуст. Добавьте записи, чтобы экспортировать их.")
+        await message.answer(f"Ошибка при получении токена: {e}")
         return
 
-    # Генерация DOCX-файла
-    document = Document()
-    document.add_heading("Дневник пользователя", level=1)
-
-    for idx, (situation, thought, emotion, reaction, recommendation, created_at) in enumerate(entries, start=1):
-        document.add_heading(f"Запись #{idx}", level=2)
-        document.add_paragraph(f"Дата: {created_at}")
-        document.add_paragraph(f"Ситуация: {situation}")
-        document.add_paragraph(f"Мысль: {thought}")
-        document.add_paragraph(f"Эмоция: {emotion}")
-        document.add_paragraph(f"Реакция: {reaction}")
-        document.add_paragraph(f"Рекомендация: {recommendation or 'Не получена'}")
-        document.add_paragraph("-" * 118)
-
-    # Сохранение файла на сервере
-    file_path = f"tmp/diary_{user_id}.docx"
-    document.save(file_path)
-
-    # Отправка файла пользователю
-    input_file = FSInputFile(file_path)
-    await message.answer_document(
-        document=input_file,
-        caption="Ваш дневник в формате DOCX"
-    )
-
-    # Удаление временного файла
-    os.remove(file_path)
-
-@dp.message(lambda m: m.text == "Продолжить диалог с GigaChat")
-async def handle_continue_dialog_with_gigachat(message: Message):
-    user_id = message.from_user.id
-    
-    # Получение последней записи из дневника
-    last_entry = await get_last_diary_entry(user_id)
-    if not last_entry:
-        await message.answer("У вас еще нет записей в дневнике. Добавьте запись, чтобы начать диалог с GigaChat.")
-        return
-
-    # Генерация промпта на основе последней записи
-    situation, thought, emotion, reaction, entry_id = last_entry
-    prompt = generate_prompt(situation, thought, emotion, reaction)
-
-    # Добавляем контекст для продолжения диалога
-    continuation_prompt = f"""
-    На основе анализа последней записи и рекомендаций:
-    {prompt}
-
-    Теперь ты можешь задать вопрос пользователю или предложить дополнительную поддержку.
-    Сформулируй вопрос или идею для обсуждения, чтобы продолжить диалог.
-    """
-
     try:
-        # Получение ответа от GigaChat с памятью
-        response = await get_recommendation_with_memory(user_id, continuation_prompt)
-        await message.answer(
-            f"ГигаЧат: {response}",
-            reply_markup=get_end_dialog_button()
-        )
+        recommendation = await get_recommendation(prompt, giga_token)
+        await message.answer(f"Рекомендация:\n{recommendation}")
     except Exception as e:
-        await message.answer(f"Произошла ошибка при взаимодействии с GigaChat: {e}")
-
-@dp.message(lambda m: m.reply_to_message and "ГигаЧат" in m.reply_to_message.text)
-async def handle_follow_up_with_gigachat(message: Message):
-    user_id = message.from_user.id
-    user_question = message.text
-
-    # Формируем промпт на основе вопроса пользователя
-    follow_up_prompt = f"""
-    Пользователь задал вопрос или продолжил диалог:
-    "{user_question}"
-
-    Ответь подробно и продолжи поддерживать диалог, опираясь на предыдущий контекст.
-    """
-
-    try:
-        # Получение ответа от GigaChat с памятью
-        response = await get_recommendation_with_memory(user_id, follow_up_prompt)
-        await message.answer(
-            f"ГигаЧат: {response}",
-            reply_markup=get_end_dialog_button()
-        )
-    except Exception as e:
-        await message.answer(f"Произошла ошибка при взаимодействии с GigaChat: {e}")
-
-@dp.callback_query(lambda c: c.data == "end_dialog")
-async def handle_end_dialog(callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-
-    # Очистка памяти пользователя
-    if user_id in user_memories:
-        user_memories[user_id].clear()
-
-    # Уведомляем пользователя о завершении диалога
-    await callback_query.answer("Диалог завершен.")
-
-    # Отправляем новое сообщение с главным меню
-    await callback_query.message.reply(
-        "Диалог с GigaChat завершен. Вы вернулись в главное меню.",
-        reply_markup=main_menu  # Отправляем главное меню
-    )
+        await message.answer(str(e))
 
 # --- Update the settings menu handler ---
 @dp.message(lambda m: m.text == "Настройки")
@@ -747,6 +547,17 @@ async def process_reminder_time(message: Message, state: FSMContext):
 class FeedbackForm(StatesGroup):
     feedback = State()
 
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Добавить запись в дневник")],
+        [KeyboardButton(text="Получить рекомендацию")],
+        [KeyboardButton(text="Настройки")],
+        [KeyboardButton(text="Оставить отзыв")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
 @dp.message(lambda m: m.text == "Оставить отзыв")
 async def handle_menu_feedback(message: Message, state: FSMContext):
     await state.set_state(FeedbackForm.feedback)
@@ -792,7 +603,6 @@ async def init_db():
                 thought TEXT,
                 emotion TEXT,
                 reaction TEXT,
-                recommendation TEXT DEFAULT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
@@ -821,7 +631,6 @@ async def init_db():
             """
         )
         await db.commit()
-
 
 # --- Main Entry Point ---
 async def main():
