@@ -624,13 +624,6 @@ async def handle_menu_settings(message: Message):
     settings_menu = await generate_settings_menu(user_id)
     await message.answer("Настройки напоминаний:", reply_markup=settings_menu)
 
-@dp.message()
-async def unknown_message(message: Message):
-    await message.answer(
-        "Ой, кажется вы попали в неизвестное место, попробуйте другую команду или кнопку :)",
-        reply_markup=main_menu
-    )
-
 @dp.callback_query(lambda c: c.data in ["toggle_reminder_on", "toggle_reminder_off"])
 async def toggle_reminders(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
@@ -698,12 +691,12 @@ class FeedbackForm(StatesGroup):
     feedback = State()
 
 @dp.message(lambda m: m.text == "Оставить отзыв")
+@dp.message(Command(commands=["feedback"]))
 async def handle_menu_feedback(message: Message, state: FSMContext):
     await state.set_state(FeedbackForm.feedback)
     await message.answer("Пожалуйста, оставьте ваш отзыв:", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(FeedbackForm.feedback)
-@dp.message(Command(commands=["feedback"]))
 async def process_feedback(message: Message, state: FSMContext):
     feedback = message.text
     user_id = message.from_user.id
@@ -722,7 +715,12 @@ async def process_feedback(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Спасибо за ваш отзыв!", reply_markup=main_menu)
 
-
+@dp.message()
+async def unknown_message(message: Message):
+    await message.answer(
+        "Ой, кажется вы попали в неизвестное место, попробуйте другую команду или кнопку :)",
+        reply_markup=main_menu
+    )
 # ------------------------------------------------------------------------------
 # Инициализация базы данных
 # ------------------------------------------------------------------------------
