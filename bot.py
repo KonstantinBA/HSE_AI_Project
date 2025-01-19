@@ -715,6 +715,28 @@ async def process_feedback(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Спасибо за ваш отзыв!", reply_markup=main_menu)
 
+@dp.message(lambda message: message.text.lower() in ["годжо сатору", "gojo satoru", "gojo", "satoru gojo",
+                                                     "сатору годжо", "годжо", "сатору", "satoru",
+                                                     "годжо сатори", "сатори годжо", "сатори"])
+async def send_gojo_image(message: Message):
+    try:
+        # Путь к изображению
+        image_path = "pic/gojo.jpg"
+        
+        # Проверка наличия файла
+        if not os.path.exists(image_path):
+            await message.answer("Эх, пасхалка потерялась")
+            return
+
+        # Отправка изображения пользователю
+        photo = FSInputFile(image_path)
+        await message.answer_photo(photo, caption="Вот он мистер пасхалкин!")
+
+    except Exception as e:
+        await message.answer(f"Ошибка при отправке изображения: {e}")
+
+
+
 @dp.message()
 async def unknown_message(message: Message):
     await message.answer(
