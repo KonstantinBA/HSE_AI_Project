@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 model = GigaChat(
     credentials=API_KEY,
     scope="GIGACHAT_API_PERS",
-    model="GigaChat-Max",
+    model="GigaChat-Pro",
     verify_ssl_certs=False,
 )
 
@@ -97,6 +97,9 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # --- States ---
+class DialogForm(StatesGroup):
+    in_dialog = State()
+
 class RegistrationForm(StatesGroup):
     name = State()
     age = State()
@@ -444,24 +447,26 @@ async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.callback_query(lambda c: c.data == "continue_dialog")
-async def continue_dialog(callback_query: CallbackQuery):
+async def continue_dialog(callback_query: CallbackQuery, state: FSMContext):
     await callback_query.message.answer("Продолжайте диалог. Напишите ваш вопрос:", reply_markup=ReplyKeyboardRemove())
     user_id = str(callback_query.from_user.id)
-    @dp.message(lambda _: True)
+    await state.set_state(DialogForm.in_dialog)
+    await callback_query.answer()
 
-    async def dialog_interaction(message: Message):
-        input_messages = [HumanMessage(content=message.text)]
-        user_id = str(message.from_user.id)
-        
-        try:
-            output = await app.ainvoke(
-                {"messages": input_messages},
-                config={"configurable": {"thread_id": user_id}}
-            )
-            response = output["messages"][-1].content
-            await message.answer(response, reply_markup=dialog_buttons)
-        except Exception as e:
-            await message.answer(f"Ошибка во время диалога: {e}")
+@dp.message(DialogForm.in_dialog)
+async def dialog_interaction(message: Message):
+    input_messages = [HumanMessage(content=message.text)]
+    user_id = str(message.from_user.id)
+    
+    try:
+        output = await app.ainvoke(
+            {"messages": input_messages},
+            config={"configurable": {"thread_id": user_id}}
+        )
+        response = output["messages"][-1].content
+        await message.answer(response, reply_markup=dialog_buttons)
+    except Exception as e:
+        await message.answer(f"Ошибка во время диалога: {e}")
 
 @dp.callback_query(lambda c: c.data == "end_dialog")
 async def end_dialog(callback_query: CallbackQuery, state: FSMContext):
@@ -738,7 +743,11 @@ async def send_gojo_image(message: Message):
 
 
 @dp.message()
-async def unknown_message(message: Message):
+async def unknown_message(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state in [DiaryForm.situation, DiaryForm.thought, DiaryForm.emotion, DiaryForm.reaction, ReminderForm.time, DialogForm.in_dialog, FeedbackForm.feedback]:
+        return
+
     await message.answer(
         "Ой, кажется вы попали в неизвестное место, попробуйте другую команду или кнопку :)",
         reply_markup=main_menu
