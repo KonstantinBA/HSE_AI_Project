@@ -111,6 +111,15 @@ class DiaryForm(StatesGroup):
 class ReminderForm(StatesGroup):
     time = State()
 
+class DialogForm(StatesGroup):
+    in_dialog = State()
+
+class ReminderForm(StatesGroup):
+    time = State()
+
+class FeedbackForm(StatesGroup):
+    feedback = State()
+
 # --- Keyboards ---
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
@@ -429,24 +438,25 @@ async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.callback_query(lambda c: c.data == "continue_dialog")
-async def continue_dialog(callback_query: CallbackQuery):
+async def continue_dialog(callback_query: CallbackQuery, state: FSMContext):
     await callback_query.message.answer("Продолжайте диалог. Напишите ваш вопрос:", reply_markup=ReplyKeyboardRemove())
-    user_id = str(callback_query.from_user.id)
-    @dp.message(lambda _: True)
+    await state.set_state(DialogForm.in_dialog)
+    await callback_query.answer()
 
-    async def dialog_interaction(message: Message):
-        input_messages = [HumanMessage(content=message.text)]
-        user_id = str(message.from_user.id)
-        
-        try:
-            output = await app.ainvoke(
-                {"messages": input_messages},
-                config={"configurable": {"thread_id": user_id}}
-            )
-            response = output["messages"][-1].content
-            await message.answer(response, reply_markup=dialog_buttons)
-        except Exception as e:
-            await message.answer(f"Ошибка во время диалога: {e}")
+@dp.message(DialogForm.in_dialog)
+async def dialog_interaction(message: Message, state: FSMContext):
+    input_messages = [HumanMessage(content=message.text)]
+    user_id = str(message.from_user.id)
+
+    try:
+        output = await app.ainvoke(
+            {"messages": input_messages},
+            config={"configurable": {"thread_id": user_id}}
+        )
+        response = output["messages"][-1].content
+        await message.answer(response, reply_markup=dialog_buttons)
+    except Exception as e:
+        await message.answer(f"Ошибка во время диалога: {e}")
 
 @dp.callback_query(lambda c: c.data == "end_dialog")
 async def end_dialog(callback_query: CallbackQuery, state: FSMContext):
@@ -467,9 +477,9 @@ async def end_dialog(callback_query: CallbackQuery, state: FSMContext):
 
 @dp.message(lambda m: m.text == "Экспортировать дневник")
 @dp.message(Command(commands=["export_diary"]))
-async def handle_export_diary(message: Message):
+async def handle_export_diary(message: types.Message):
     user_id = message.from_user.id
-    
+
     # Получение всех записей пользователя
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -487,6 +497,11 @@ async def handle_export_diary(message: Message):
         await message.answer("Ваш дневник пуст. Добавьте записи, чтобы экспортировать их.")
         return
 
+    # Проверка существования директории и её создание, если она не существует
+    tmp_dir = "tmp"
+    if not os.path.exists(tmp_dir):
+        os.makedirs(tmp_dir)
+
     # Генерация DOCX-файла
     document = Document()
     document.add_heading("Дневник пользователя", level=1)
@@ -501,7 +516,7 @@ async def handle_export_diary(message: Message):
         document.add_paragraph(f"Рекомендация: {recommendation or 'Не получена'}")
         document.add_paragraph("-" * 118)
 
-    file_path = f"tmp/diary_{user_id}.docx"
+    file_path = os.path.join(tmp_dir, f"diary_{user_id}.docx")
     document.save(file_path)
 
     input_file = FSInputFile(file_path)
@@ -556,7 +571,7 @@ async def handle_view_diary(message: Message):
             ]
         ])
 
-        await message.answer(diary_text, reply_markup=delete_button, parse_mode=ParseMode.HTML)
+    await message.answer(diary_text, reply_markup=delete_button, parse_mode=ParseMode.HTML)
 
 @dp.callback_query(lambda c: c.data.startswith("delete_diary_"))
 async def handle_delete_diary(callback_query: CallbackQuery):
@@ -583,13 +598,6 @@ async def handle_menu_settings(message: Message):
     user_id = message.from_user.id
     settings_menu = await generate_settings_menu(user_id)
     await message.answer("Настройки напоминаний:", reply_markup=settings_menu)
-
-@dp.message()
-async def unknown_message(message: Message):
-    await message.answer(
-        "Ой, кажется вы попали в неизвестное место, попробуйте другую команду или кнопку :)",
-        reply_markup=main_menu
-    )
 
 @dp.callback_query(lambda c: c.data in ["toggle_reminder_on", "toggle_reminder_off"])
 async def toggle_reminders(callback_query: CallbackQuery):
@@ -683,6 +691,17 @@ async def process_feedback(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Спасибо за ваш отзыв!", reply_markup=main_menu)
 
+@dp.message()
+async def unknown_message(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state in [DiaryForm.situation, DiaryForm.thought, DiaryForm.emotion, DiaryForm.reaction, ReminderForm.time, DialogForm.in_dialog, FeedbackForm.feedback]:
+        return
+
+    await message.answer(
+        "Ой, кажется вы попали в неизвестное место, попробуйте другую команду или кнопку :)",
+        reply_markup=main_menu
+    )
+    
 # ------------------------------------------------------------------------------
 # Инициализация базы данных
 # ------------------------------------------------------------------------------
