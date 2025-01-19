@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 model = GigaChat(
     credentials=API_KEY,
     scope="GIGACHAT_API_PERS",
-    model="GigaChat-Pro",
+    model="GigaChat",
     verify_ssl_certs=False,
 )
 
@@ -358,6 +358,8 @@ async def process_reaction(message: Message, state: FSMContext):
 async def handle_menu_get_recommendation(message: Message):
     user_id = str(message.from_user.id)
 
+    await message.answer("Сейчас посмотрим, подождите...")
+
     # Получение последней записи (функция получения записи из БД)
     last_entry = await get_last_diary_entry(int(user_id))
     if not last_entry:
@@ -392,7 +394,7 @@ async def handle_menu_get_recommendation(message: Message):
                 
                 Важно: Не используй шаблонные или общие рекомендации.
                 Дай рекомендации и советы, адаптированные к этой записи.
-                Не более 3000 символов."""
+                Не более 2000 символов."""
         )
     ]
 
@@ -745,7 +747,9 @@ async def send_gojo_image(message: Message):
 @dp.message()
 async def unknown_message(message: Message, state: FSMContext):
     current_state = await state.get_state()
-    if current_state in [DiaryForm.situation, DiaryForm.thought, DiaryForm.emotion, DiaryForm.reaction, ReminderForm.time, DialogForm.in_dialog, FeedbackForm.feedback]:
+    if current_state in [DiaryForm.situation, DiaryForm.thought, DiaryForm.emotion,
+                         DiaryForm.reaction, ReminderForm.time, DialogForm.in_dialog,
+                         FeedbackForm.feedback, ReminderForm.time]:
         return
 
     await message.answer(
@@ -810,6 +814,7 @@ async def init_db():
 # Main Entry Point
 # ------------------------------------------------------------------------------
 async def main():
+    # Инициализируем базу данных, команды бота, планировщик и т.д.
     await init_db()
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать работу"),
@@ -826,7 +831,7 @@ async def main():
         scheduler.add_job(send_reminders, "cron", second=0)
     if not scheduler.running:
         scheduler.start()
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, timeout=60)
 
 if __name__ == "__main__":
     try:
