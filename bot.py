@@ -810,7 +810,6 @@ async def init_db():
 # Main Entry Point
 # ------------------------------------------------------------------------------
 async def main():
-    # Инициализируем базу данных, команды бота, планировщик и т.д.
     await init_db()
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать работу"),
