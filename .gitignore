@@ -1,6 +1,6 @@
 db.sqlite3
 .env
 venv
-database/users.db
 users.db
 tmp
+database/users.db

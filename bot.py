@@ -114,11 +114,9 @@ class ReminderForm(StatesGroup):
 # --- Keyboards ---
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Добавить запись в дневник")],
-        [KeyboardButton(text="Получить рекомендацию")],
-        [KeyboardButton(text="Оставить отзыв")],
-        [KeyboardButton(text="Экспортировать дневник")],
-        [KeyboardButton(text="Настройки")]
+        [KeyboardButton(text="Добавить запись в дневник"), KeyboardButton(text="Получить рекомендацию")],
+        [KeyboardButton(text="Посмотреть дневник"), KeyboardButton(text="Экспортировать дневник")],
+        [KeyboardButton(text="Оставить отзыв"), KeyboardButton(text="Настройки")]
     ],
     resize_keyboard=True,
     one_time_keyboard=True
@@ -432,14 +430,13 @@ async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
 
 @dp.callback_query(lambda c: c.data == "continue_dialog")
 async def continue_dialog(callback_query: CallbackQuery):
-    await callback_query.message.answer("Продолжайте диалог. Напишите ваш вопрос:")
+    await callback_query.message.answer("Продолжайте диалог. Напишите ваш вопрос:", reply_markup=ReplyKeyboardRemove())
     user_id = str(callback_query.from_user.id)
     @dp.message(lambda _: True)
-    
+
     async def dialog_interaction(message: Message):
         input_messages = [HumanMessage(content=message.text)]
         user_id = str(message.from_user.id)
-        print(user_id, input_messages, "__USER_ID__")
         
         try:
             output = await app.ainvoke(
@@ -457,17 +454,19 @@ async def end_dialog(callback_query: CallbackQuery, state: FSMContext):
 
     # Убираем inline-кнопки
     await callback_query.message.edit_reply_markup(reply_markup=None)
-    
+
     # Очищаем FSM состояние
     await state.clear()
 
     # Уведомляем пользователя о завершении
     await callback_query.answer("Диалог завершён.")
     await callback_query.message.answer(
-        "Диалог завершён. Если понадобится помощь снова, выберите нужный пункт меню."
+        "Диалог завершён. Если понадобится помощь снова, выберите нужный пункт меню.",
+        reply_markup=main_menu
     )
 
 @dp.message(lambda m: m.text == "Экспортировать дневник")
+@dp.message(Command(commands=["export_diary"]))
 async def handle_export_diary(message: Message):
     user_id = message.from_user.id
     
@@ -512,11 +511,85 @@ async def handle_export_diary(message: Message):
     )
     os.remove(file_path)
 
+@dp.message(lambda m: m.text == "Посмотреть дневник")
+@dp.message(Command(commands=["view_diary"]))
+async def handle_view_diary(message: Message):
+    user_id = message.from_user.id
+
+    # Получение всех записей пользователя
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT id, situation, thought, emotion, reaction, recommendation, created_at
+            FROM diary
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (user_id,)
+        ) as cursor:
+            entries = await cursor.fetchall()
+
+    if not entries:
+        await message.answer("Ваш дневник пуст. Добавьте записи, чтобы их увидеть.")
+        return
+
+    for entry in entries:
+        entry_id, situation, thought, emotion, reaction, recommendation, created_at = entry
+
+        # Формируем текст записи
+        diary_text = (
+            f"<b>Дата:</b> {created_at}\n"
+            f"<b>Ситуация:</b> {situation}\n"
+            f"<b>Мысль:</b> {thought}\n"
+            f"<b>Эмоция:</b> {emotion}\n"
+            f"<b>Реакция:</b> {reaction}\n"
+            f"<b>Рекомендация:</b> {recommendation or 'Не получена'}"
+        )
+
+        # Создаем inline-кнопку для удаления записи
+        delete_button = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Удалить запись",
+                    callback_data=f"delete_diary_{entry_id}"
+                )
+            ]
+        ])
+
+        await message.answer(diary_text, reply_markup=delete_button, parse_mode=ParseMode.HTML)
+
+@dp.callback_query(lambda c: c.data.startswith("delete_diary_"))
+async def handle_delete_diary(callback_query: CallbackQuery):
+    entry_id = int(callback_query.data.split("_")[2])
+
+    # Удаляем запись из базы данных
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM diary WHERE id = ?",
+            (entry_id,)
+        )
+        await db.commit()
+
+    # Уведомляем пользователя об успешном удалении
+    await callback_query.answer("Запись успешно удалена!")
+
+    # Обновляем сообщение, убирая inline-кнопки
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+    await callback_query.message.answer("Запись была удалена.")
+
 @dp.message(lambda m: m.text == "Настройки")
+@dp.message(Command(commands=["settings"]))
 async def handle_menu_settings(message: Message):
     user_id = message.from_user.id
     settings_menu = await generate_settings_menu(user_id)
     await message.answer("Настройки напоминаний:", reply_markup=settings_menu)
+
+@dp.message()
+async def unknown_message(message: Message):
+    await message.answer(
+        "Ой, кажется вы попали в неизвестное место, попробуйте другую команду или кнопку :)",
+        reply_markup=main_menu
+    )
 
 @dp.callback_query(lambda c: c.data in ["toggle_reminder_on", "toggle_reminder_off"])
 async def toggle_reminders(callback_query: CallbackQuery):
@@ -591,6 +664,7 @@ async def handle_menu_feedback(message: Message, state: FSMContext):
     await message.answer("Пожалуйста, оставьте ваш отзыв:", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(FeedbackForm.feedback)
+@dp.message(Command(commands=["feedback"]))
 async def process_feedback(message: Message, state: FSMContext):
     feedback = message.text
     user_id = message.from_user.id
@@ -673,6 +747,10 @@ async def main():
         BotCommand(command="start", description="Начать работу"),
         BotCommand(command="new_entry", description="Добавить запись в дневник"),
         BotCommand(command="get_recommendation", description="Получить рекомендацию"),
+        BotCommand(command="view_diary", description="Посмотреть дневник"),
+        BotCommand(command="export_diary", description="Экспортировать дневник"),
+        BotCommand(command="feedback", description="Оставить отзыв"),
+        BotCommand(command="settings", description="Открыть настройки"),
     ])
     if not scheduler.get_jobs():
         scheduler.remove_all_jobs()
