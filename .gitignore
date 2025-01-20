@@ -1,0 +1,6 @@
+db.sqlite3
+.env
+venv
+users.db
+tmp
+database/users.db
