@@ -159,6 +159,7 @@ class RegistrationMiddleware(BaseMiddleware):
         event: types.TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
+        print(isinstance(event, Message))
         if isinstance(event, Message) and event.text != '/start':
             user_id = event.chat.id
             fsm_context: FSMContext = data["state"]
@@ -768,7 +769,8 @@ async def init_db():
                 id INTEGER PRIMARY KEY,
                 name TEXT,
                 age INTEGER,
-                email TEXT
+                email TEXT,
+                created_at DATETIME DEFAULT (DATETIME('now', '+3 hours'))
             )
             """
         )
