@@ -37,15 +37,15 @@ from langchain_gigachat.chat_models import GigaChat
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
-
+from datetime import datetime, timedelta, timezone
 # Загружаем переменные из файла .env
 load_dotenv()
 
 API_TOKEN = os.getenv('API_TOKEN')
 API_KEY = os.getenv('GIGACHAT_KEY')
 DB_PATH = "database/users.db"
-moscow_tz = timezone("Europe/Moscow")
-
+gmt_plus_3 = timezone(timedelta(hours=3))
+print(gmt_plus_3)
 # --- Logging configuration ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -159,6 +159,7 @@ class RegistrationMiddleware(BaseMiddleware):
         event: types.TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
+        print(isinstance(event, Message))
         if isinstance(event, Message) and event.text != '/start':
             user_id = event.chat.id
             fsm_context: FSMContext = data["state"]
@@ -184,8 +185,9 @@ class RegistrationMiddleware(BaseMiddleware):
 
 # --- Reminder Function ---
 async def send_reminders():
-    current_time = datetime.now(moscow_tz).strftime("%H:%M")
-    current_date = datetime.now(moscow_tz).date()
+    current_time = datetime.now(gmt_plus_3).strftime("%H:%M")
+    current_date = datetime.now(gmt_plus_3).date()
+
     print(f"[DEBUG] Current time: {current_time}, Current date: {current_date}")
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -767,7 +769,8 @@ async def init_db():
                 id INTEGER PRIMARY KEY,
                 name TEXT,
                 age INTEGER,
-                email TEXT
+                email TEXT,
+                created_at DATETIME DEFAULT (DATETIME('now', '+3 hours'))
             )
             """
         )
@@ -781,7 +784,7 @@ async def init_db():
                 emotion TEXT,
                 reaction TEXT,
                 recommendation TEXT DEFAULT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT (DATETIME('now', '+3 hours')),
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
             """
@@ -803,7 +806,7 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 feedback TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT (DATETIME('now', '+3 hours')),
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
             """
