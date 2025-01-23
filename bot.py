@@ -203,7 +203,6 @@ class RegistrationMiddleware(BaseMiddleware):
         event: types.TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        print(isinstance(event, Message))
         if isinstance(event, Message) and event.text != '/start':
             user_id = event.chat.id
             fsm_context: FSMContext = data["state"]
