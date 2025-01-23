@@ -45,12 +45,14 @@ API_TOKEN = os.getenv('API_TOKEN')
 API_KEY = os.getenv('GIGACHAT_KEY')
 DB_PATH = "database/users.db"
 gmt_plus_3 = timezone(timedelta(hours=3))
-print(gmt_plus_3)
 # --- Logging configuration ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация GigaChat (если необходимо, замените параметры)
+
+# ------------------------------------------------------------------------------
+# Инициализация GigaChat
+# ------------------------------------------------------------------------------
 model = GigaChat(
     credentials=API_KEY,
     scope="GIGACHAT_API_PERS",
@@ -85,10 +87,14 @@ memory = MemorySaver()
 # Компилируем граф, получая приложение для вызова модели
 app = workflow.compile(checkpointer=memory)
 
-# --- Scheduler initialization ---
+# ------------------------------------------------------------------------------
+# Scheduler initialization
+# ------------------------------------------------------------------------------
 scheduler = AsyncIOScheduler()
 
-# --- Bot and Dispatcher initialization ---
+# ------------------------------------------------------------------------------
+# Bot and Dispatcher initialization
+# ------------------------------------------------------------------------------
 bot = Bot(
     token=API_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -96,7 +102,9 @@ bot = Bot(
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# --- States ---
+# ------------------------------------------------------------------------------
+# States
+# ------------------------------------------------------------------------------
 class DialogForm(StatesGroup):
     in_dialog = State()
 
@@ -114,7 +122,13 @@ class DiaryForm(StatesGroup):
 class ReminderForm(StatesGroup):
     time = State()
 
-# --- Keyboards ---
+# Анкета обратной связи
+class FeedbackForm(StatesGroup):
+    feedback = State()
+
+# ------------------------------------------------------------------------------
+# Keyboards
+# ------------------------------------------------------------------------------
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Добавить запись в дневник"), KeyboardButton(text="Получить рекомендацию")],
@@ -151,7 +165,37 @@ dialog_buttons = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Завершить диалог", callback_data="end_dialog")]
 ])
 
-# --- Middleware for registration check ---
+# Генерация настроек (InlineKeyboard) динамически
+async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT enabled FROM reminders WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            result = await cursor.fetchone()
+            reminders_enabled = result[0] if result else 0
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="\u2705 Напоминания: Включить" if not reminders_enabled else "\u274C Напоминания: Выключить",
+                callback_data="toggle_reminder_on" if not reminders_enabled else "toggle_reminder_off"
+            )
+        ]
+    ]
+
+    if reminders_enabled:
+        buttons.append([
+            InlineKeyboardButton(
+                text="Установить время напоминания",
+                callback_data="set_reminder_time"
+            )
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ------------------------------------------------------------------------------
+# Middleware for registration check
+# ------------------------------------------------------------------------------
 class RegistrationMiddleware(BaseMiddleware):
     async def __call__(
         self,
@@ -183,7 +227,9 @@ class RegistrationMiddleware(BaseMiddleware):
 
         return await handler(event, data)
 
-# --- Reminder Function ---
+# ------------------------------------------------------------------------------
+# Reminder Function
+# ------------------------------------------------------------------------------
 async def send_reminders():
     current_time = datetime.now(gmt_plus_3).strftime("%H:%M")
     current_date = datetime.now(gmt_plus_3).date()
@@ -225,7 +271,9 @@ async def send_reminders():
                         f"Не удалось отправить напоминание пользователю {user_id}: {e}"
                     )
 
-# --- Utility Functions ---
+# ------------------------------------------------------------------------------
+# Utility Functions
+# ------------------------------------------------------------------------------
 async def get_last_diary_entry(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -246,7 +294,9 @@ async def get_last_diary_entry(user_id: int):
 # --- Register Middleware ---
 dp.update.middleware.register(RegistrationMiddleware())
 
-# --- Handlers ---
+# ------------------------------------------------------------------------------
+# Handlers
+# ------------------------------------------------------------------------------
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
@@ -421,34 +471,6 @@ async def handle_menu_get_recommendation(message: Message):
 
     except Exception as e:
         await message.answer(f"Ошибка анализа: {e}")
-
-# Генерация настроек (InlineKeyboard) динамически
-async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT enabled FROM reminders WHERE user_id = ?", (user_id,)
-        ) as cursor:
-            result = await cursor.fetchone()
-            reminders_enabled = result[0] if result else 0
-
-    buttons = [
-        [
-            InlineKeyboardButton(
-                text="\u2705 Напоминания: Включить" if not reminders_enabled else "\u274C Напоминания: Выключить",
-                callback_data="toggle_reminder_on" if not reminders_enabled else "toggle_reminder_off"
-            )
-        ]
-    ]
-
-    if reminders_enabled:
-        buttons.append([
-            InlineKeyboardButton(
-                text="Установить время напоминания",
-                callback_data="set_reminder_time"
-            )
-        ])
-
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 @dp.callback_query(lambda c: c.data == "continue_dialog")
 async def continue_dialog(callback_query: CallbackQuery, state: FSMContext):
@@ -694,10 +716,6 @@ async def process_reminder_time(message: Message, state: FSMContext):
 
     except ValueError as e:
         await message.answer(f"Ошибка: {e}. Попробуйте ещё раз в формате ЧЧ:ММ.")
-
-# Анкета обратной связи
-class FeedbackForm(StatesGroup):
-    feedback = State()
 
 @dp.message(lambda m: m.text == "Оставить отзыв")
 @dp.message(Command(commands=["feedback"]))
