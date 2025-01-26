@@ -191,6 +191,13 @@ async def generate_settings_menu(user_id: int) -> InlineKeyboardMarkup:
             )
         ])
 
+    buttons.append([
+        InlineKeyboardButton(
+            text="Удалить профиль",
+            callback_data="delete_profile"
+        )
+    ])
+
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ------------------------------------------------------------------------------
@@ -531,7 +538,8 @@ async def cmd_help(message: Message):
         "🔹 Посмотреть дневник – перечитывай записи и следи за прогрессом.\n"
         "🔹 Экспортировать дневник – загружай записи в удобном формате.\n"
         "🔹 Оставить отзыв – помоги сделать бота лучше.\n"
-        "🔹 Настройки – настрой уведомления, чтобы не забыть заполнить дневник (по умолчанию 18:00, если не указывали ранее)"
+        "🔹 Настройки – настрой уведомления, чтобы не забыть заполнить дневник (по умолчанию 18:00, если не указывали ранее)\n"
+        "🔹 В натройках также можно удалить свой профиль в боте.."
     )
     await message.answer(help_text)
 
@@ -647,12 +655,43 @@ async def handle_delete_diary(callback_query: CallbackQuery):
     await callback_query.message.edit_reply_markup(reply_markup=None)
     await callback_query.message.answer("Запись была удалена.")
 
+# Обработчик нажатия кнопки "Удалить профиль"
+@dp.callback_query(lambda c: c.data == "delete_profile")
+async def delete_profile(callback_query: CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+
+    try:
+        # Удаляем пользователя из базы данных
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            await db.execute("DELETE FROM diary WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM reminders WHERE user_id = ?", (user_id,))
+            await db.execute("DELETE FROM feedback WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+        # Сброс состояния пользователя
+        await state.clear()
+
+        # Уведомляем пользователя
+        await callback_query.message.answer(
+            "Ваш профиль был успешно удалён. Пожалуйста, зарегистрируйтесь снова с помощью команды /start."
+        )
+
+        await callback_query.answer("Профиль удалён.")
+        await state.set_state(RegistrationForm.name)
+        await callback_query.message.answer("Введите ваше имя:")
+
+    except Exception as e:
+        await callback_query.answer(
+            f"Произошла ошибка при удалении профиля: {e}", show_alert=True
+        )
+
 @dp.message(lambda m: m.text == "Настройки")
 @dp.message(Command(commands=["settings"]))
 async def handle_menu_settings(message: Message):
     user_id = message.from_user.id
-    settings_menu = await generate_settings_menu(user_id)
-    await message.answer("Настройки напоминаний:", reply_markup=settings_menu)
+    settings_menu_markup = await generate_settings_menu(user_id)
+    await message.answer("Настройки:", reply_markup=settings_menu_markup)
 
 @dp.callback_query(lambda c: c.data in ["toggle_reminder_on", "toggle_reminder_off"])
 async def toggle_reminders(callback_query: CallbackQuery):
